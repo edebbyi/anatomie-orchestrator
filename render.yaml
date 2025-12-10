@@ -2,6 +2,7 @@ services:
   - type: web
     name: anatomie-orchestrator
     env: python
+    pythonVersion: 3.11
     region: virginia
     plan: starter
     buildCommand: pip install -r requirements.txt
