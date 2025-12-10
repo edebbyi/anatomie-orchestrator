@@ -3,8 +3,8 @@ import pytest
 import respx
 import httpx
 
-from orchestrator.coordinator import LearningCycleCoordinator
-import orchestrator.state as state_module
+from src.coordinator import LearningCycleCoordinator
+import src.state as state_module
 
 
 @pytest.fixture()

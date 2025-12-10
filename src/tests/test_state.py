@@ -3,7 +3,7 @@ from pathlib import Path
 
 import pytest
 
-import orchestrator.state as state_module
+import src.state as state_module
 
 
 @pytest.fixture()

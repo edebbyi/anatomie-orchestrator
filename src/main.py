@@ -6,9 +6,9 @@ from fastapi import BackgroundTasks, FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
-from orchestrator.config import get_settings
-from orchestrator.coordinator import get_coordinator
-from orchestrator.state import get_state
+from src.config import get_settings
+from src.coordinator import get_coordinator
+from src.state import get_state
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)

@@ -1,6 +1,6 @@
 # Environment variables
 .env
-orchestrator/.env
+src/.env
 
 # Python
 __pycache__/

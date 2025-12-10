@@ -5,8 +5,8 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-import orchestrator.state as state_module
-import orchestrator.coordinator as coordinator_module
+import src.state as state_module
+import src.coordinator as coordinator_module
 
 
 @pytest.fixture()
@@ -28,7 +28,7 @@ def app_client(tmp_path, monkeypatch):
     monkeypatch.setattr(coord, "run_learning_cycle", fake_cycle)
 
     # reload main after monkeypatching state so app uses isolated state
-    main = importlib.reload(importlib.import_module("orchestrator.main"))
+    main = importlib.reload(importlib.import_module("src.main"))
     client = TestClient(main.app)
     yield client
 
