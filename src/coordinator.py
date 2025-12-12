@@ -350,19 +350,41 @@ class LearningCycleCoordinator:
         self,
         num_prompts: int,
         renderer: str,
+        batch_size: Optional[int] = None,
     ) -> Dict[str, Any]:
-        """Call Generator to create prompts."""
+        """
+        Call Generator to create prompts.
+        Automatically batches large requests to avoid timeouts.
+        """
         url = f"{self.settings.generator_service_url}/generate-prompts"
-
-        payload = {
-            "num_prompts": num_prompts,
-            "renderer": renderer,
-        }
+        all_prompts = []
+        remaining = num_prompts
+        batch_num = 0
+        effective_batch = batch_size or num_prompts
 
         async with httpx.AsyncClient(timeout=self.settings.generator_timeout) as client:
-            response = await client.post(url, json=payload)
-            response.raise_for_status()
-            return response.json()
+            while remaining > 0:
+                batch_num += 1
+                current_batch = min(remaining, effective_batch)
+                logger.info(f"Generator batch {batch_num}: requesting {current_batch} prompts")
+
+                payload = {
+                    "num_prompts": current_batch,
+                    "renderer": renderer,
+                }
+
+                response = await client.post(url, json=payload)
+                response.raise_for_status()
+                result = response.json()
+
+                batch_prompts = result.get("prompts", [])
+                all_prompts.extend(batch_prompts)
+                logger.info(f"Generator batch {batch_num}: received {len(batch_prompts)} prompts")
+
+                remaining -= current_batch
+
+        logger.info(f"Generator complete: {len(all_prompts)} total prompts from {batch_num} batches")
+        return {"prompts": all_prompts}
 
     # =========================================================================
     # OPTIMIZER INTEGRATION (existing)
