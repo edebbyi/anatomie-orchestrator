@@ -25,13 +25,13 @@ services:
         value: appW8hvRj3lUrqEH2
       - key: AIRTABLE_STRUCTURES_TABLE_ID
         value: tblPPDf9vlTBv2kyl
+      - key: AIRTABLE_BATCH_SETTINGS_TABLE_ID
+        value: tblLniml0SiVxrvvC
       - key: LIKE_THRESHOLD
         value: "25"
       - key: EXPLORATION_RATE
         value: "0.2"
-      - key: DEFAULT_BATCH_IDEAS
-        value: "3"
-      - key: DEFAULT_NUM_PROMPTS
+      - key: FALLBACK_NUM_PROMPTS
         value: "30"
-      - key: DEFAULT_RENDERER
+      - key: FALLBACK_RENDERER
         value: "ImageFX"

@@ -1,4 +1,5 @@
 import logging
+from dataclasses import dataclass
 from typing import Dict, Any, Optional
 
 import httpx
@@ -7,6 +8,16 @@ from src.config import get_settings, Settings
 from src.state import get_state, OrchestratorState
 
 logger = logging.getLogger(__name__)
+
+
+@dataclass
+class BatchSettings:
+    """Settings fetched from Airtable Daily Batch Settings table."""
+    batch_enabled: bool = True
+    default_num_prompts: int = 30
+    default_renderer: str = "ImageFX"
+    email_notifications: bool = True
+    notification_email: str = ""
 
 
 class LearningCycleCoordinator:
@@ -22,7 +33,7 @@ class LearningCycleCoordinator:
         self.state: OrchestratorState = get_state()
 
     # =========================================================================
-    # LEARNING CYCLE
+    # LEARNING CYCLE (existing, enhanced)
     # =========================================================================
 
     async def run_learning_cycle(self) -> Dict[str, Any]:
@@ -96,23 +107,21 @@ class LearningCycleCoordinator:
         logger.info(f"Cached {len(scores)} structure scores")
 
     # =========================================================================
-    # DAILY BATCH
+    # DAILY BATCH (new)
     # =========================================================================
 
     async def run_daily_batch(
         self,
         force_retrain: bool = False,
-        num_ideas: Optional[int] = None,
-        num_prompts: Optional[int] = None,
-        renderer: Optional[str] = None,
     ) -> Dict[str, Any]:
         """
         Execute the daily batch workflow:
-        1. Check if retrain needed (threshold reached or forced)
-        2. Get optimizer scores (fresh or cached)
-        3. Call Strategist to generate ideas (with optimizer scores)
-        4. Call Generator to create prompts
-        5. Return summary for N8n to send email
+        1. Fetch batch settings from Airtable
+        2. Check if retrain needed (threshold reached or forced)
+        3. Get optimizer scores (fresh or cached)
+        4. Call Strategist to generate ideas (with optimizer scores)
+        5. Call Generator to create prompts (using Airtable settings)
+        6. Return summary for N8n to send email
         """
         logger.info("STARTING DAILY BATCH")
 
@@ -128,6 +137,14 @@ class LearningCycleCoordinator:
         }
 
         try:
+            # Step 1: Fetch batch settings from Airtable
+            batch_settings = await self._fetch_batch_settings()
+            logger.info(
+                f"Batch settings: {batch_settings.default_num_prompts} prompts, "
+                f"renderer={batch_settings.default_renderer}"
+            )
+
+            # Step 2: Check if retrain needed
             should_retrain = (
                 force_retrain
                 or self.state.likes_since_last_retrain >= self.settings.like_threshold
@@ -138,24 +155,31 @@ class LearningCycleCoordinator:
                 results["retrain_triggered"] = True
                 results["retrain_result"] = await self.run_learning_cycle()
 
+            # Step 3: Get optimizer scores
             optimizer_scores = await self._get_optimizer_scores()
 
+            # Step 4: Call Strategist with optimizer scores
+            # (Strategist reads its own batchSize from Airtable)
             logger.info("Calling Strategist for new ideas...")
             results["strategist_result"] = await self._call_strategist(
                 optimizer_scores=optimizer_scores,
-                num_ideas=num_ideas or self.settings.default_batch_ideas,
             )
             results["ideas_generated"] = results["strategist_result"].get("totalGenerated", 0)
 
-            logger.info("Calling Generator for prompts...")
+            # Step 5: Call Generator for prompts (using Airtable settings)
+            logger.info(
+                f"Calling Generator for {batch_settings.default_num_prompts} prompts "
+                f"with renderer={batch_settings.default_renderer}..."
+            )
             results["generator_result"] = await self._call_generator(
-                num_prompts=num_prompts or self.settings.default_num_prompts,
-                renderer=renderer or self.settings.default_renderer,
+                num_prompts=batch_settings.default_num_prompts,
+                renderer=batch_settings.default_renderer,
             )
             results["prompts_generated"] = len(
                 results["generator_result"].get("prompts", [])
             )
 
+            # Record batch
             self.state.record_batch({
                 "ideas": results["ideas_generated"],
                 "prompts": results["prompts_generated"],
@@ -175,6 +199,55 @@ class LearningCycleCoordinator:
 
         return results
 
+    async def _fetch_batch_settings(self) -> BatchSettings:
+        """Fetch batch settings from Airtable Daily Batch Settings table."""
+        if not self.settings.airtable_api_key:
+            logger.warning("No Airtable API key - using fallback settings")
+            return BatchSettings(
+                default_num_prompts=self.settings.fallback_num_prompts,
+                default_renderer=self.settings.fallback_renderer,
+            )
+
+        url = (
+            f"https://api.airtable.com/v0/"
+            f"{self.settings.airtable_base_id}/"
+            f"{self.settings.airtable_batch_settings_table_id}"
+        )
+        headers = {
+            "Authorization": f"Bearer {self.settings.airtable_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        try:
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(url, headers=headers, params={"maxRecords": 1})
+                response.raise_for_status()
+                data = response.json()
+
+                records = data.get("records", [])
+                if not records:
+                    logger.warning("No batch settings record found - using fallbacks")
+                    return BatchSettings(
+                        default_num_prompts=self.settings.fallback_num_prompts,
+                        default_renderer=self.settings.fallback_renderer,
+                    )
+
+                fields = records[0].get("fields", {})
+                return BatchSettings(
+                    batch_enabled=fields.get("batchEnabled", True),
+                    default_num_prompts=fields.get("numPrompts", self.settings.fallback_num_prompts),
+                    default_renderer=fields.get("renderer", self.settings.fallback_renderer),
+                    email_notifications=fields.get("emailNotifications", True),
+                    notification_email=fields.get("notificationEmail", ""),
+                )
+
+        except Exception as e:
+            logger.error(f"Failed to fetch batch settings: {e} - using fallbacks")
+            return BatchSettings(
+                default_num_prompts=self.settings.fallback_num_prompts,
+                default_renderer=self.settings.fallback_renderer,
+            )
+
     async def _get_optimizer_scores(self) -> Dict[str, float]:
         """Get optimizer scores - fresh if stale, cached otherwise."""
         if self.state.has_fresh_scores(max_age_hours=24):
@@ -193,14 +266,19 @@ class LearningCycleCoordinator:
     async def _call_strategist(
         self,
         optimizer_scores: Dict[str, float],
-        num_ideas: int = 5,
     ) -> Dict[str, Any]:
-        """Call Strategist to generate new structure ideas."""
+        """
+        Call Strategist to generate new structure ideas.
+        Passes optimizer scores so ideas are guided by ML predictions.
+        Note: Strategist reads its own batchSize from Airtable.
+        """
         url = f"{self.settings.strategist_service_url}/api/batch/run"
+
+        # Pass optimizer_scores in the body for Strategist to consider
+        # Strategist reads batchSize from its own Airtable settings
         payload = {
             "optimizer_scores": optimizer_scores,
             "exploration_rate": self.settings.exploration_rate,
-            "num_ideas": num_ideas,
         }
 
         async with httpx.AsyncClient(timeout=self.settings.strategist_timeout) as client:
@@ -209,7 +287,7 @@ class LearningCycleCoordinator:
             return response.json()
 
     # =========================================================================
-    # MANUAL GENERATION
+    # MANUAL GENERATION (new)
     # =========================================================================
 
     async def run_manual_generation(
@@ -218,7 +296,11 @@ class LearningCycleCoordinator:
         renderer: Optional[str] = None,
         force_retrain: bool = False,
     ) -> Dict[str, Any]:
-        """Execute manual prompt generation."""
+        """
+        Execute manual prompt generation:
+        1. Optionally trigger learning cycle
+        2. Call Generator with specified parameters
+        """
         logger.info(f"STARTING MANUAL GENERATION: {num_prompts} prompts, renderer={renderer}")
 
         results = {
@@ -231,23 +313,26 @@ class LearningCycleCoordinator:
         }
 
         try:
+            # Optional retrain
             if force_retrain and not self.state.is_retraining:
                 logger.info("Force retrain requested")
                 results["retrain_triggered"] = True
                 results["retrain_result"] = await self.run_learning_cycle()
 
+            # Call Generator
             logger.info("Calling Generator...")
             results["generator_result"] = await self._call_generator(
                 num_prompts=num_prompts,
-                renderer=renderer or self.settings.default_renderer,
+                renderer=renderer or self.settings.fallback_renderer,
             )
             results["prompts_generated"] = len(
                 results["generator_result"].get("prompts", [])
             )
 
+            # Record generation
             self.state.record_generation({
                 "prompts": results["prompts_generated"],
-                "renderer": renderer or self.settings.default_renderer,
+                "renderer": renderer or self.settings.fallback_renderer,
                 "manual": True,
             })
 
@@ -268,6 +353,7 @@ class LearningCycleCoordinator:
     ) -> Dict[str, Any]:
         """Call Generator to create prompts."""
         url = f"{self.settings.generator_service_url}/generate-prompts"
+
         payload = {
             "num_prompts": num_prompts,
             "renderer": renderer,
@@ -279,7 +365,7 @@ class LearningCycleCoordinator:
             return response.json()
 
     # =========================================================================
-    # OPTIMIZER INTEGRATION
+    # OPTIMIZER INTEGRATION (existing)
     # =========================================================================
 
     async def _train_optimizer(self) -> Dict[str, Any]:

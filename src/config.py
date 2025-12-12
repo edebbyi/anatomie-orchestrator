@@ -13,15 +13,15 @@ class Settings(BaseSettings):
     airtable_api_key: str = ""
     airtable_base_id: str = "appW8hvRj3lUrqEH2"
     airtable_structures_table_id: str = "tblPPDf9vlTBv2kyl"
+    airtable_batch_settings_table_id: str = "tblLniml0SiVxrvvC"
 
     # Learning cycle
     like_threshold: int = 25
     exploration_rate: float = 0.2
 
-    # Batch generation defaults
-    default_batch_ideas: int = 3
-    default_num_prompts: int = 30
-    default_renderer: str = "ImageFX"
+    # Fallback defaults (used only if Airtable fetch fails)
+    fallback_num_prompts: int = 30
+    fallback_renderer: str = "ImageFX"
 
     # Timeouts (seconds)
     train_timeout: int = 600

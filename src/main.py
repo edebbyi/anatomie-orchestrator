@@ -10,7 +10,9 @@ from src.config import get_settings
 from src.coordinator import get_coordinator
 from src.state import get_state
 
-logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s")
+logging.basicConfig(
+    level=logging.INFO, format="%(asctime)s - %(name)s - %(levelname)s - %(message)s"
+)
 logger = logging.getLogger(__name__)
 
 
@@ -31,6 +33,11 @@ app.add_middleware(
 )
 
 
+# =============================================================================
+# REQUEST/RESPONSE MODELS
+# =============================================================================
+
+
 class LikeEventRequest(BaseModel):
     record_id: Optional[str] = None
     structure_id: Optional[str] = None
@@ -47,13 +54,12 @@ class LikeEventResponse(BaseModel):
 
 
 class DailyBatchRequest(BaseModel):
+    """Request for daily batch generation."""
     force_retrain: bool = False
-    num_ideas: Optional[int] = None
-    num_prompts: Optional[int] = None
-    renderer: Optional[str] = None
 
 
 class DailyBatchResponse(BaseModel):
+    """Response from daily batch - used by N8n for email."""
     success: bool
     retrain_triggered: bool
     ideas_generated: int
@@ -63,17 +69,24 @@ class DailyBatchResponse(BaseModel):
 
 
 class ManualGenerateRequest(BaseModel):
+    """Request for manual prompt generation."""
     num_prompts: int = 12
     renderer: Optional[str] = None
     force_retrain: bool = False
 
 
 class ManualGenerateResponse(BaseModel):
+    """Response from manual generation."""
     success: bool
     retrain_triggered: bool
     prompts_generated: int
     renderer: str
     error: Optional[str] = None
+
+
+# =============================================================================
+# CORE ENDPOINTS
+# =============================================================================
 
 
 @app.get("/")
@@ -108,8 +121,27 @@ async def get_status():
     }
 
 
+# =============================================================================
+# EVENT ENDPOINTS (new unified entry points)
+# =============================================================================
+
+
 @app.post("/events/daily_batch", response_model=DailyBatchResponse)
 async def handle_daily_batch(request: DailyBatchRequest):
+    """
+    Handle daily batch generation.
+    Called by N8n on schedule (6 AM).
+
+    Workflow:
+    1. Fetch settings from Airtable (defaultNumPrompts, defaultRenderer)
+    2. Check if retrain needed
+    3. Get optimizer scores
+    4. Call Strategist for new ideas (reads its own batchSize from Airtable)
+    5. Call Generator for prompts (using Airtable settings)
+    6. Return summary for email
+
+    Returns structured response for N8n to use in email.
+    """
     state = get_state()
 
     if state.is_retraining:
@@ -125,11 +157,9 @@ async def handle_daily_batch(request: DailyBatchRequest):
     coordinator = get_coordinator()
     result = await coordinator.run_daily_batch(
         force_retrain=request.force_retrain,
-        num_ideas=request.num_ideas,
-        num_prompts=request.num_prompts,
-        renderer=request.renderer,
     )
 
+    # Build summary for email
     parts = []
     if result["retrain_triggered"]:
         parts.append("Learning cycle completed")
@@ -149,6 +179,12 @@ async def handle_daily_batch(request: DailyBatchRequest):
 
 @app.post("/events/manual_generate", response_model=ManualGenerateResponse)
 async def handle_manual_generate(request: ManualGenerateRequest):
+    """
+    Handle manual prompt generation request.
+    Called by N8n from Airtable button or manual trigger.
+
+    Accepts custom num_prompts and renderer.
+    """
     state = get_state()
     settings = get_settings()
 
@@ -157,7 +193,7 @@ async def handle_manual_generate(request: ManualGenerateRequest):
             success=False,
             retrain_triggered=False,
             prompts_generated=0,
-            renderer=request.renderer or settings.default_renderer,
+            renderer=request.renderer or settings.fallback_renderer,
             error="retrain_in_progress",
         )
 
@@ -172,13 +208,19 @@ async def handle_manual_generate(request: ManualGenerateRequest):
         success=result["success"],
         retrain_triggered=result["retrain_triggered"],
         prompts_generated=result["prompts_generated"],
-        renderer=request.renderer or settings.default_renderer,
+        renderer=request.renderer or settings.fallback_renderer,
         error=result.get("error"),
     )
 
 
 @app.post("/events/like", response_model=LikeEventResponse)
 async def handle_like_event(request: LikeEventRequest, background_tasks: BackgroundTasks):
+    """
+    Handle like event from N8n outlier workflow.
+    Triggers learning cycle when threshold reached.
+
+    This is the renamed /like_event endpoint for consistency.
+    """
     state = get_state()
     settings = get_settings()
 
@@ -216,13 +258,23 @@ async def handle_like_event(request: LikeEventRequest, background_tasks: Backgro
     )
 
 
+# =============================================================================
+# LEGACY ENDPOINTS (preserved for backwards compatibility)
+# =============================================================================
+
+
 @app.post("/like_event", response_model=LikeEventResponse)
 async def receive_like_event(request: LikeEventRequest, background_tasks: BackgroundTasks):
+    """
+    Legacy endpoint - redirects to /events/like.
+    Preserved for backwards compatibility with existing N8n workflows.
+    """
     return await handle_like_event(request, background_tasks)
 
 
 @app.post("/trigger_retrain")
 async def trigger_retrain(background_tasks: BackgroundTasks):
+    """Manually trigger the learning cycle."""
     state = get_state()
 
     if state.is_retraining:
@@ -237,13 +289,21 @@ async def trigger_retrain(background_tasks: BackgroundTasks):
 
 @app.post("/reset_counter")
 async def reset_counter():
+    """Reset the like counter (admin use)."""
     state = get_state()
-    state.reset_likes()
+    state._likes_since_last_retrain = 0
+    state._save_state()
     return {"status": "reset", "likes_since_last_retrain": 0}
+
+
+# =============================================================================
+# UTILITY ENDPOINTS
+# =============================================================================
 
 
 @app.get("/scores")
 async def get_cached_scores():
+    """Get currently cached optimizer scores."""
     state = get_state()
     return {
         "scores": state.get_cached_scores(),
@@ -251,9 +311,3 @@ async def get_cached_scores():
         "is_fresh": state.has_fresh_scores(),
         "count": len(state.get_cached_scores()),
     }
-
-
-if __name__ == "__main__":
-    import uvicorn
-
-    uvicorn.run(app, host="0.0.0.0", port=8000)
