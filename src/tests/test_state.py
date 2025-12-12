@@ -39,3 +39,15 @@ def test_state_persists_to_disk(isolated_state: state_module.OrchestratorState):
     persisted = json.loads(Path(state_file).read_text())
     assert persisted["likes_since_last_retrain"] == 1
     assert persisted["total_retrains"] == 0
+
+
+def test_batch_and_generation_and_cache(isolated_state: state_module.OrchestratorState):
+    isolated_state.record_batch({"ideas": 3, "prompts": 6})
+    isolated_state.record_generation({"prompts": 2})
+    isolated_state.cache_scores({"42": 0.9})
+
+    status = isolated_state.get_status()
+    assert status["total_batches"] == 1
+    assert status["total_generations"] == 1
+    assert status["cached_scores_count"] == 1
+    assert isolated_state.has_fresh_scores()

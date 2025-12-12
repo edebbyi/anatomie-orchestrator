@@ -1,20 +1,35 @@
 import logging
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 
 import httpx
 
-from src.config import get_settings
-from src.state import get_state
+from src.config import get_settings, Settings
+from src.state import get_state, OrchestratorState
 
 logger = logging.getLogger(__name__)
 
 
 class LearningCycleCoordinator:
+    """
+    Coordinates the full autonomous workflow:
+    1. Learning cycle (Optimizer train → score → insights → update Generator → update Airtable)
+    2. Daily batch (check retrain → get scores → call Strategist → call Generator)
+    3. Manual generation (call Generator with parameters)
+    """
+
     def __init__(self):
-        self.settings = get_settings()
-        self.state = get_state()
+        self.settings: Settings = get_settings()
+        self.state: OrchestratorState = get_state()
+
+    # =========================================================================
+    # LEARNING CYCLE
+    # =========================================================================
 
     async def run_learning_cycle(self) -> Dict[str, Any]:
+        """
+        Execute the full learning cycle.
+        Called when like threshold is reached or manually triggered.
+        """
         logger.info("STARTING LEARNING CYCLE")
         self.state.set_retraining(True)
         self.state.set_error(None)
@@ -26,34 +41,36 @@ class LearningCycleCoordinator:
             "generator_update": None,
             "airtable_update": None,
             "success": False,
-            "error": None,
         }
 
         try:
-            # Step 1: Train
-            logger.info("Step 1/5: Training Optimizer...")
+            # Step 1: Train optimizer
+            logger.info("Step 1/5: Training optimizer...")
             results["train"] = await self._train_optimizer()
-            if results["train"].get("status") == "error":
-                raise Exception(f"Training failed: {results['train'].get('error')}")
 
-            # Step 2: Score
-            logger.info("Step 2/5: Scoring Structures...")
+            # Step 2: Score structures
+            logger.info("Step 2/5: Scoring structures...")
             results["score"] = await self._score_structures()
-            if "error" in results["score"]:
-                raise Exception(f"Scoring failed: {results['score'].get('error')}")
 
-            # Step 3: Insights
-            logger.info("Step 3/5: Getting Structure Prompt Insights...")
+            # Step 3: Get insights
+            logger.info("Step 3/5: Getting insights...")
             results["insights"] = await self._get_structure_insights()
 
-            # Step 4: Update Generator
-            logger.info("Step 4/5: Updating Generator Preferences...")
-            results["generator_update"] = await self._update_generator(results["score"], results["insights"])
+            # Step 4: Update generator
+            logger.info("Step 4/5: Updating generator...")
+            results["generator_update"] = await self._update_generator(
+                results["score"], results["insights"]
+            )
 
             # Step 5: Update Airtable
             logger.info("Step 5/5: Updating Airtable...")
-            results["airtable_update"] = await self._update_airtable_scores(results["score"].get("structures", []))
+            structures = results["score"].get("structures", [])
+            results["airtable_update"] = await self._update_airtable_scores(structures)
 
+            # Cache scores for Strategist use
+            self._cache_optimizer_scores(results["score"])
+
+            # Reset counter
             self.state.reset_likes()
             results["success"] = True
             logger.info("LEARNING CYCLE COMPLETE")
@@ -66,6 +83,204 @@ class LearningCycleCoordinator:
             self.state.set_retraining(False)
 
         return results
+
+    def _cache_optimizer_scores(self, score_response: Dict[str, Any]):
+        """Cache optimizer scores for Strategist integration."""
+        scores = {}
+        for struct in score_response.get("structures", []):
+            struct_id = struct.get("structure_id")
+            score = struct.get("predicted_success_score")
+            if struct_id and score is not None:
+                scores[str(struct_id)] = score
+        self.state.cache_scores(scores)
+        logger.info(f"Cached {len(scores)} structure scores")
+
+    # =========================================================================
+    # DAILY BATCH
+    # =========================================================================
+
+    async def run_daily_batch(
+        self,
+        force_retrain: bool = False,
+        num_ideas: Optional[int] = None,
+        num_prompts: Optional[int] = None,
+        renderer: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """
+        Execute the daily batch workflow:
+        1. Check if retrain needed (threshold reached or forced)
+        2. Get optimizer scores (fresh or cached)
+        3. Call Strategist to generate ideas (with optimizer scores)
+        4. Call Generator to create prompts
+        5. Return summary for N8n to send email
+        """
+        logger.info("STARTING DAILY BATCH")
+
+        results = {
+            "retrain_triggered": False,
+            "retrain_result": None,
+            "strategist_result": None,
+            "generator_result": None,
+            "ideas_generated": 0,
+            "prompts_generated": 0,
+            "success": False,
+            "error": None,
+        }
+
+        try:
+            should_retrain = (
+                force_retrain
+                or self.state.likes_since_last_retrain >= self.settings.like_threshold
+            )
+
+            if should_retrain and not self.state.is_retraining:
+                logger.info("Threshold reached or forced - running learning cycle first")
+                results["retrain_triggered"] = True
+                results["retrain_result"] = await self.run_learning_cycle()
+
+            optimizer_scores = await self._get_optimizer_scores()
+
+            logger.info("Calling Strategist for new ideas...")
+            results["strategist_result"] = await self._call_strategist(
+                optimizer_scores=optimizer_scores,
+                num_ideas=num_ideas or self.settings.default_batch_ideas,
+            )
+            results["ideas_generated"] = results["strategist_result"].get("totalGenerated", 0)
+
+            logger.info("Calling Generator for prompts...")
+            results["generator_result"] = await self._call_generator(
+                num_prompts=num_prompts or self.settings.default_num_prompts,
+                renderer=renderer or self.settings.default_renderer,
+            )
+            results["prompts_generated"] = len(
+                results["generator_result"].get("prompts", [])
+            )
+
+            self.state.record_batch({
+                "ideas": results["ideas_generated"],
+                "prompts": results["prompts_generated"],
+                "retrain_triggered": results["retrain_triggered"],
+            })
+
+            results["success"] = True
+            logger.info(
+                f"DAILY BATCH COMPLETE: {results['ideas_generated']} ideas, "
+                f"{results['prompts_generated']} prompts"
+            )
+
+        except Exception as e:
+            logger.error(f"Daily batch failed: {e}")
+            results["error"] = str(e)
+            self.state.set_error(str(e))
+
+        return results
+
+    async def _get_optimizer_scores(self) -> Dict[str, float]:
+        """Get optimizer scores - fresh if stale, cached otherwise."""
+        if self.state.has_fresh_scores(max_age_hours=24):
+            logger.info("Using cached optimizer scores")
+            return self.state.get_cached_scores()
+
+        logger.info("Fetching fresh optimizer scores")
+        try:
+            score_response = await self._score_structures()
+            self._cache_optimizer_scores(score_response)
+            return self.state.get_cached_scores()
+        except Exception as e:
+            logger.warning(f"Could not fetch fresh scores: {e}, using cached")
+            return self.state.get_cached_scores()
+
+    async def _call_strategist(
+        self,
+        optimizer_scores: Dict[str, float],
+        num_ideas: int = 5,
+    ) -> Dict[str, Any]:
+        """Call Strategist to generate new structure ideas."""
+        url = f"{self.settings.strategist_service_url}/api/batch/run"
+        payload = {
+            "optimizer_scores": optimizer_scores,
+            "exploration_rate": self.settings.exploration_rate,
+            "num_ideas": num_ideas,
+        }
+
+        async with httpx.AsyncClient(timeout=self.settings.strategist_timeout) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            return response.json()
+
+    # =========================================================================
+    # MANUAL GENERATION
+    # =========================================================================
+
+    async def run_manual_generation(
+        self,
+        num_prompts: int,
+        renderer: Optional[str] = None,
+        force_retrain: bool = False,
+    ) -> Dict[str, Any]:
+        """Execute manual prompt generation."""
+        logger.info(f"STARTING MANUAL GENERATION: {num_prompts} prompts, renderer={renderer}")
+
+        results = {
+            "retrain_triggered": False,
+            "retrain_result": None,
+            "generator_result": None,
+            "prompts_generated": 0,
+            "success": False,
+            "error": None,
+        }
+
+        try:
+            if force_retrain and not self.state.is_retraining:
+                logger.info("Force retrain requested")
+                results["retrain_triggered"] = True
+                results["retrain_result"] = await self.run_learning_cycle()
+
+            logger.info("Calling Generator...")
+            results["generator_result"] = await self._call_generator(
+                num_prompts=num_prompts,
+                renderer=renderer or self.settings.default_renderer,
+            )
+            results["prompts_generated"] = len(
+                results["generator_result"].get("prompts", [])
+            )
+
+            self.state.record_generation({
+                "prompts": results["prompts_generated"],
+                "renderer": renderer or self.settings.default_renderer,
+                "manual": True,
+            })
+
+            results["success"] = True
+            logger.info(f"MANUAL GENERATION COMPLETE: {results['prompts_generated']} prompts")
+
+        except Exception as e:
+            logger.error(f"Manual generation failed: {e}")
+            results["error"] = str(e)
+            self.state.set_error(str(e))
+
+        return results
+
+    async def _call_generator(
+        self,
+        num_prompts: int,
+        renderer: str,
+    ) -> Dict[str, Any]:
+        """Call Generator to create prompts."""
+        url = f"{self.settings.generator_service_url}/generate-prompts"
+        payload = {
+            "num_prompts": num_prompts,
+            "renderer": renderer,
+        }
+
+        async with httpx.AsyncClient(timeout=self.settings.generator_timeout) as client:
+            response = await client.post(url, json=payload)
+            response.raise_for_status()
+            return response.json()
+
+    # =========================================================================
+    # OPTIMIZER INTEGRATION
+    # =========================================================================
 
     async def _train_optimizer(self) -> Dict[str, Any]:
         url = f"{self.settings.optimizer_service_url}/train"
@@ -92,7 +307,9 @@ class LearningCycleCoordinator:
             logger.warning(f"Could not get structure insights: {e}")
             return {"status": "not_available", "insights": {}}
 
-    async def _update_generator(self, score_response: Dict[str, Any], insights_response: Dict[str, Any]) -> Dict[str, Any]:
+    async def _update_generator(
+        self, score_response: Dict[str, Any], insights_response: Dict[str, Any]
+    ) -> Dict[str, Any]:
         url = f"{self.settings.generator_service_url}/update_preferences"
 
         structure_scores = {}
@@ -118,7 +335,10 @@ class LearningCycleCoordinator:
             return {"status": "skipped", "reason": "No API key"}
 
         url = f"https://api.airtable.com/v0/{self.settings.airtable_base_id}/{self.settings.airtable_structures_table_id}"
-        headers = {"Authorization": f"Bearer {self.settings.airtable_api_key}", "Content-Type": "application/json"}
+        headers = {
+            "Authorization": f"Bearer {self.settings.airtable_api_key}",
+            "Content-Type": "application/json",
+        }
 
         updated = 0
         async with httpx.AsyncClient(timeout=30) as client:
@@ -128,7 +348,9 @@ class LearningCycleCoordinator:
                 if struct_id and score is not None:
                     try:
                         response = await client.patch(
-                            f"{url}/{struct_id}", headers=headers, json={"fields": {"optimizer_score": score}}
+                            f"{url}/{struct_id}",
+                            headers=headers,
+                            json={"fields": {"optimizer_score": score}},
                         )
                         if response.status_code == 200:
                             updated += 1

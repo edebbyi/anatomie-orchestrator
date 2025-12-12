@@ -10,6 +10,7 @@ STATE_FILE = Path("data/orchestrator_state.json")
 
 class OrchestratorState:
     def __init__(self):
+        # Learning cycle state
         self._likes_since_last_retrain: int = 0
         self._last_retrain_at: Optional[str] = None
         self._last_like_at: Optional[str] = None
@@ -17,6 +18,17 @@ class OrchestratorState:
         self._total_likes_processed: int = 0
         self._last_error: Optional[str] = None
         self._is_retraining: bool = False
+        # Batch generation state
+        self._last_batch_at: Optional[str] = None
+        self._total_batches: int = 0
+        self._last_batch_result: Optional[Dict[str, Any]] = None
+        # Prompt generation state
+        self._last_generation_at: Optional[str] = None
+        self._total_generations: int = 0
+        self._last_generation_result: Optional[Dict[str, Any]] = None
+        # Cached optimizer scores
+        self._cached_structure_scores: Dict[str, float] = {}
+        self._scores_cached_at: Optional[str] = None
         self._load_state()
 
     def _load_state(self):
@@ -29,6 +41,18 @@ class OrchestratorState:
                     self._last_like_at = data.get("last_like_at")
                     self._total_retrains = data.get("total_retrains", 0)
                     self._total_likes_processed = data.get("total_likes_processed", 0)
+                    # Batch
+                    self._last_batch_at = data.get("last_batch_at")
+                    self._total_batches = data.get("total_batches", 0)
+                    self._last_batch_result = data.get("last_batch_result")
+                    # Generation
+                    self._last_generation_at = data.get("last_generation_at")
+                    self._total_generations = data.get("total_generations", 0)
+                    self._last_generation_result = data.get("last_generation_result")
+                    # Cached scores
+                    self._cached_structure_scores = data.get("cached_structure_scores", {})
+                    self._scores_cached_at = data.get("scores_cached_at")
+                    logger.info(f"Loaded state: {self._likes_since_last_retrain} likes, {self._total_batches} batches")
         except Exception as e:  # pragma: no cover - defensive logging
             logger.warning(f"Could not load state: {e}")
 
@@ -43,6 +67,14 @@ class OrchestratorState:
                         "last_like_at": self._last_like_at,
                         "total_retrains": self._total_retrains,
                         "total_likes_processed": self._total_likes_processed,
+                        "last_batch_at": self._last_batch_at,
+                        "total_batches": self._total_batches,
+                        "last_batch_result": self._last_batch_result,
+                        "last_generation_at": self._last_generation_at,
+                        "total_generations": self._total_generations,
+                        "last_generation_result": self._last_generation_result,
+                        "cached_structure_scores": self._cached_structure_scores,
+                        "scores_cached_at": self._scores_cached_at,
                     },
                     f,
                     indent=2,
@@ -77,6 +109,56 @@ class OrchestratorState:
     def is_retraining(self) -> bool:
         return self._is_retraining
 
+    # Batch generation
+    def record_batch(self, result: Dict[str, Any]):
+        self._last_batch_at = datetime.now(timezone.utc).isoformat()
+        self._total_batches += 1
+        self._last_batch_result = result
+        self._save_state()
+
+    @property
+    def last_batch_at(self) -> Optional[str]:
+        return self._last_batch_at
+
+    @property
+    def total_batches(self) -> int:
+        return self._total_batches
+
+    # Prompt generation
+    def record_generation(self, result: Dict[str, Any]):
+        self._last_generation_at = datetime.now(timezone.utc).isoformat()
+        self._total_generations += 1
+        self._last_generation_result = result
+        self._save_state()
+
+    @property
+    def last_generation_at(self) -> Optional[str]:
+        return self._last_generation_at
+
+    @property
+    def total_generations(self) -> int:
+        return self._total_generations
+
+    # Cached scores
+    def cache_scores(self, scores: Dict[str, float]):
+        self._cached_structure_scores = scores
+        self._scores_cached_at = datetime.now(timezone.utc).isoformat()
+        self._save_state()
+
+    def get_cached_scores(self) -> Dict[str, float]:
+        return self._cached_structure_scores
+
+    @property
+    def scores_cached_at(self) -> Optional[str]:
+        return self._scores_cached_at
+
+    def has_fresh_scores(self, max_age_hours: int = 24) -> bool:
+        if not self._scores_cached_at:
+            return False
+        cached_time = datetime.fromisoformat(self._scores_cached_at.replace("Z", "+00:00"))
+        age = datetime.now(timezone.utc) - cached_time
+        return age.total_seconds() < (max_age_hours * 3600)
+
     def get_status(self) -> Dict[str, Any]:
         return {
             "likes_since_last_retrain": self._likes_since_last_retrain,
@@ -86,6 +168,14 @@ class OrchestratorState:
             "total_likes_processed": self._total_likes_processed,
             "is_retraining": self._is_retraining,
             "last_error": self._last_error,
+            "last_batch_at": self._last_batch_at,
+            "total_batches": self._total_batches,
+            "last_batch_result": self._last_batch_result,
+            "last_generation_at": self._last_generation_at,
+            "total_generations": self._total_generations,
+            "last_generation_result": self._last_generation_result,
+            "scores_cached_at": self._scores_cached_at,
+            "cached_scores_count": len(self._cached_structure_scores),
         }
 
 

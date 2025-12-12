@@ -14,12 +14,24 @@ services:
     healthCheckPath: /health
     envVars:
       - key: OPTIMIZER_SERVICE_URL
-        value: https://anatomie-optimizer.onrender.com
+        value: https://optimizer-2ym2.onrender.com
       - key: GENERATOR_SERVICE_URL
         value: https://anatomie-prompt-generator.onrender.com
+      - key: STRATEGIST_SERVICE_URL
+        value: https://anatomie-prompt-strategist.onrender.com
       - key: AIRTABLE_API_KEY
         sync: false
+      - key: AIRTABLE_BASE_ID
+        value: appW8hvRj3lUrqEH2
+      - key: AIRTABLE_STRUCTURES_TABLE_ID
+        value: tblPPDf9vlTBv2kyl
       - key: LIKE_THRESHOLD
         value: "25"
       - key: EXPLORATION_RATE
         value: "0.2"
+      - key: DEFAULT_BATCH_IDEAS
+        value: "5"
+      - key: DEFAULT_NUM_PROMPTS
+        value: "12"
+      - key: DEFAULT_RENDERER
+        value: "ImageFX"
