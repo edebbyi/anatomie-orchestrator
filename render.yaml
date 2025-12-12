@@ -27,6 +27,10 @@ services:
         value: tblPPDf9vlTBv2kyl
       - key: AIRTABLE_BATCH_SETTINGS_TABLE_ID
         value: tblLniml0SiVxrvvC
+      - key: AIRTABLE_PROMPTS_TABLE_ID
+        value: tblX05YGjgno7tMNc
+      - key: AIRTABLE_HISTORY_TABLE_ID
+        value: tblFUPRzlkb3wltrH
       - key: LIKE_THRESHOLD
         value: "25"
       - key: EXPLORATION_RATE

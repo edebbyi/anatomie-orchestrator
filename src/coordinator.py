@@ -120,8 +120,10 @@ class LearningCycleCoordinator:
         2. Check if retrain needed (threshold reached or forced)
         3. Get optimizer scores (fresh or cached)
         4. Call Strategist to generate ideas (with optimizer scores)
-        5. Call Generator to create prompts (using Airtable settings)
-        6. Return summary for N8n to send email
+        5. Warm up Generator (handles cold starts)
+        6. Call Generator to create prompts (using Airtable settings)
+        7. Write prompts to Airtable
+        8. Return summary for N8n to send email
         """
         logger.info("STARTING DAILY BATCH")
 
@@ -132,6 +134,7 @@ class LearningCycleCoordinator:
             "generator_result": None,
             "ideas_generated": 0,
             "prompts_generated": 0,
+            "prompts_written": 0,
             "success": False,
             "error": None,
         }
@@ -166,7 +169,13 @@ class LearningCycleCoordinator:
             )
             results["ideas_generated"] = results["strategist_result"].get("totalGenerated", 0)
 
-            # Step 5: Call Generator for prompts (using Airtable settings)
+            # Step 5: Warm up Generator (handles cold starts on free tier)
+            await self._warm_up_service(
+                self.settings.generator_service_url, 
+                "Generator"
+            )
+
+            # Step 6: Call Generator for prompts (using Airtable settings)
             logger.info(
                 f"Calling Generator for {batch_settings.default_num_prompts} prompts "
                 f"with renderer={batch_settings.default_renderer}..."
@@ -179,6 +188,14 @@ class LearningCycleCoordinator:
                 results["generator_result"].get("prompts", [])
             )
 
+            # Step 7: Write prompts to Airtable
+            if results["prompts_generated"] > 0:
+                logger.info(f"Writing {results['prompts_generated']} prompts to Airtable...")
+                write_result = await self._write_prompts_to_airtable(
+                    results["generator_result"].get("prompts", [])
+                )
+                results["prompts_written"] = write_result.get("written", 0)
+
             # Record batch
             self.state.record_batch({
                 "ideas": results["ideas_generated"],
@@ -189,7 +206,7 @@ class LearningCycleCoordinator:
             results["success"] = True
             logger.info(
                 f"DAILY BATCH COMPLETE: {results['ideas_generated']} ideas, "
-                f"{results['prompts_generated']} prompts"
+                f"{results['prompts_generated']} prompts, {results['prompts_written']} written to Airtable"
             )
 
         except Exception as e:
@@ -286,6 +303,26 @@ class LearningCycleCoordinator:
             response.raise_for_status()
             return response.json()
 
+    async def _warm_up_service(self, service_url: str, service_name: str) -> bool:
+        """
+        Pre-warm a service by hitting its health endpoint.
+        Helps avoid cold start timeouts on free Render tiers.
+        """
+        health_url = f"{service_url}/health"
+        try:
+            logger.info(f"Warming up {service_name}...")
+            async with httpx.AsyncClient(timeout=30) as client:
+                response = await client.get(health_url)
+                if response.status_code == 200:
+                    logger.info(f"{service_name} is warm and ready")
+                    return True
+                else:
+                    logger.warning(f"{service_name} health check returned {response.status_code}")
+                    return False
+        except Exception as e:
+            logger.warning(f"Could not warm up {service_name}: {e}")
+            return False
+
     # =========================================================================
     # MANUAL GENERATION (new)
     # =========================================================================
@@ -299,7 +336,9 @@ class LearningCycleCoordinator:
         """
         Execute manual prompt generation:
         1. Optionally trigger learning cycle
-        2. Call Generator with specified parameters
+        2. Warm up Generator (handles cold starts)
+        3. Call Generator with specified parameters
+        4. Write prompts to Airtable
         """
         logger.info(f"STARTING MANUAL GENERATION: {num_prompts} prompts, renderer={renderer}")
 
@@ -308,6 +347,7 @@ class LearningCycleCoordinator:
             "retrain_result": None,
             "generator_result": None,
             "prompts_generated": 0,
+            "prompts_written": 0,
             "success": False,
             "error": None,
         }
@@ -319,6 +359,12 @@ class LearningCycleCoordinator:
                 results["retrain_triggered"] = True
                 results["retrain_result"] = await self.run_learning_cycle()
 
+            # Warm up Generator (handles cold starts on free tier)
+            await self._warm_up_service(
+                self.settings.generator_service_url,
+                "Generator"
+            )
+
             # Call Generator
             logger.info("Calling Generator...")
             results["generator_result"] = await self._call_generator(
@@ -329,6 +375,14 @@ class LearningCycleCoordinator:
                 results["generator_result"].get("prompts", [])
             )
 
+            # Write prompts to Airtable
+            if results["prompts_generated"] > 0:
+                logger.info(f"Writing {results['prompts_generated']} prompts to Airtable...")
+                write_result = await self._write_prompts_to_airtable(
+                    results["generator_result"].get("prompts", [])
+                )
+                results["prompts_written"] = write_result.get("written", 0)
+
             # Record generation
             self.state.record_generation({
                 "prompts": results["prompts_generated"],
@@ -337,7 +391,7 @@ class LearningCycleCoordinator:
             })
 
             results["success"] = True
-            logger.info(f"MANUAL GENERATION COMPLETE: {results['prompts_generated']} prompts")
+            logger.info(f"MANUAL GENERATION COMPLETE: {results['prompts_generated']} prompts, {results['prompts_written']} written")
 
         except Exception as e:
             logger.error(f"Manual generation failed: {e}")
@@ -354,7 +408,7 @@ class LearningCycleCoordinator:
     ) -> Dict[str, Any]:
         """
         Call Generator to create prompts.
-        Automatically batches large requests to avoid timeouts.
+        Automatically batches large requests to avoid timeouts when batch_size is provided.
         """
         url = f"{self.settings.generator_service_url}/generate-prompts"
         all_prompts = []
@@ -385,6 +439,120 @@ class LearningCycleCoordinator:
 
         logger.info(f"Generator complete: {len(all_prompts)} total prompts from {batch_num} batches")
         return {"prompts": all_prompts}
+
+    async def _write_prompts_to_airtable(self, prompts: list) -> Dict[str, Any]:
+        """
+        Write generated prompts to Airtable Prompts table and History table.
+        
+        Returns dict with counts of successful and failed writes.
+        """
+        if not self.settings.airtable_api_key:
+            logger.warning("No Airtable API key - skipping prompt writes")
+            return {"written": 0, "failed": 0, "skipped": True}
+
+        prompts_url = (
+            f"https://api.airtable.com/v0/"
+            f"{self.settings.airtable_base_id}/"
+            f"{self.settings.airtable_prompts_table_id}"
+        )
+        history_url = (
+            f"https://api.airtable.com/v0/"
+            f"{self.settings.airtable_base_id}/"
+            f"{self.settings.airtable_history_table_id}"
+        )
+        headers = {
+            "Authorization": f"Bearer {self.settings.airtable_api_key}",
+            "Content-Type": "application/json",
+        }
+
+        written = 0
+        failed = 0
+        created_records = []  # Store created records for History
+
+        async with httpx.AsyncClient(timeout=30) as client:
+            # Step 1: Write to Prompts table in batches of 10
+            for i in range(0, len(prompts), 10):
+                batch = prompts[i:i + 10]
+                records = []
+
+                for prompt in batch:
+                    prompt_dict = prompt if isinstance(prompt, dict) else {"promptText": str(prompt)}
+                    fields = {
+                        "New Prompt": prompt_dict.get("promptText", ""),
+                        "Renderer": prompt_dict.get("renderer", ""),
+                    }
+                    
+                    # Linked records need to be arrays
+                    if prompt_dict.get("designerId"):
+                        fields["Designer"] = [prompt_dict["designerId"]]
+                    if prompt_dict.get("garmentId"):
+                        fields["Garment"] = [prompt_dict["garmentId"]]
+                    if prompt_dict.get("promptStructureId"):
+                        fields["Prompt Structure"] = [prompt_dict["promptStructureId"]]
+
+                    records.append({"fields": fields})
+
+                try:
+                    response = await client.post(
+                        prompts_url,
+                        headers=headers,
+                        json={"records": records}
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+                    
+                    # Store created records for History table
+                    for j, created in enumerate(result.get("records", [])):
+                        created_records.append({
+                            "id": created.get("id"),
+                            "fields": created.get("fields", {}),
+                            "original": batch[j]  # Keep original prompt data
+                        })
+                    
+                    written += len(result.get("records", []))
+                    logger.info(f"Wrote batch of {len(result.get('records', []))} prompts to Prompts table")
+                except Exception as e:
+                    logger.error(f"Failed to write prompt batch to Airtable: {e}")
+                    failed += len(batch)
+
+            # Step 2: Write to History table
+            history_written = 0
+            for i in range(0, len(created_records), 10):
+                batch = created_records[i:i + 10]
+                history_records = []
+
+                for record in batch:
+                    fields = {
+                        "Prompt ID": record["id"],
+                        "Prompt": record["fields"].get("New Prompt", ""),
+                        "Renderer": record["fields"].get("Renderer", ""),
+                    }
+                    
+                    # Copy linked records from created prompt
+                    if record["fields"].get("Designer"):
+                        fields["Designer"] = record["fields"]["Designer"]
+                    if record["fields"].get("Garment"):
+                        fields["Garment"] = record["fields"]["Garment"]
+                    if record["fields"].get("Prompt Structure"):
+                        fields["Prompt Structure"] = record["fields"]["Prompt Structure"]
+
+                    history_records.append({"fields": fields})
+
+                try:
+                    response = await client.post(
+                        history_url,
+                        headers=headers,
+                        json={"records": history_records}
+                    )
+                    response.raise_for_status()
+                    result = response.json()
+                    history_written += len(result.get("records", []))
+                    logger.info(f"Wrote batch of {len(result.get('records', []))} records to History table")
+                except Exception as e:
+                    logger.error(f"Failed to write history batch to Airtable: {e}")
+
+        logger.info(f"Airtable write complete: {written} prompts, {history_written} history records")
+        return {"written": written, "failed": failed, "history_written": history_written, "skipped": False}
 
     # =========================================================================
     # OPTIMIZER INTEGRATION (existing)

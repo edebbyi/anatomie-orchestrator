@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     airtable_base_id: str = "appW8hvRj3lUrqEH2"
     airtable_structures_table_id: str = "tblPPDf9vlTBv2kyl"
     airtable_batch_settings_table_id: str = "tblLniml0SiVxrvvC"
+    airtable_prompts_table_id: str = "tblX05YGjgno7tMNc"
+    airtable_history_table_id: str = "tblFUPRzlkb3wltrH"
 
     # Learning cycle
     like_threshold: int = 25
@@ -28,7 +30,7 @@ class Settings(BaseSettings):
     score_timeout: int = 120
     update_timeout: int = 30
     strategist_timeout: int = 120
-    generator_timeout: int = 60
+    generator_timeout: int = 180  # 3 min to handle cold starts + processing
 
 
 def get_settings() -> Settings:
