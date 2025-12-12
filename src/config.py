@@ -19,8 +19,8 @@ class Settings(BaseSettings):
     exploration_rate: float = 0.2
 
     # Batch generation defaults
-    default_batch_ideas: int = 5
-    default_num_prompts: int = 12
+    default_batch_ideas: int = 3
+    default_num_prompts: int = 30
     default_renderer: str = "ImageFX"
 
     # Timeouts (seconds)

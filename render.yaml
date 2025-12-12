@@ -30,8 +30,8 @@ services:
       - key: EXPLORATION_RATE
         value: "0.2"
       - key: DEFAULT_BATCH_IDEAS
-        value: "5"
+        value: "3"
       - key: DEFAULT_NUM_PROMPTS
-        value: "12"
+        value: "30"
       - key: DEFAULT_RENDERER
         value: "ImageFX"
