@@ -16,6 +16,9 @@ env/
 # Data
 data/
 
+# Ops assets
+n8n_workflows/
+
 # IDE
 .vscode/
 .idea/
