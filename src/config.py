@@ -11,11 +11,11 @@ class Settings(BaseSettings):
 
     # Airtable
     airtable_api_key: str = ""
-    airtable_base_id: str = "appW8hvRj3lUrqEH2"
-    airtable_structures_table_id: str = "tblPPDf9vlTBv2kyl"
-    airtable_batch_settings_table_id: str = "tblLniml0SiVxrvvC"
-    airtable_prompts_table_id: str = "tblX05YGjgno7tMNc"
-    airtable_history_table_id: str = "tblFUPRzlkb3wltrH"
+    airtable_base_id: str = ""
+    airtable_structures_table_id: str = ""
+    airtable_batch_settings_table_id: str = ""
+    airtable_prompts_table_id: str = ""
+    airtable_history_table_id: str = ""
 
     # Learning cycle
     like_threshold: int = 25

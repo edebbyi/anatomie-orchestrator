@@ -118,12 +118,15 @@ class LearningCycleCoordinator:
         Execute the daily batch workflow:
         1. Fetch batch settings from Airtable
         2. Check if retrain needed (threshold reached or forced)
-        3. Get optimizer scores (fresh or cached)
-        4. Call Strategist to generate ideas (with optimizer scores)
-        5. Warm up Generator (handles cold starts)
+        3. Warm up Strategist
+        4. Call Strategist to generate ideas (reads optimizer_score from Airtable)
+        5. Warm up Generator
         6. Call Generator to create prompts (using Airtable settings)
         7. Write prompts to Airtable
         8. Return summary for N8n to send email
+        
+        Note: Strategist reads optimizer_score directly from Airtable Structures table.
+        Scores are written there by the learning cycle after retraining.
         """
         logger.info("STARTING DAILY BATCH")
 
@@ -158,15 +161,17 @@ class LearningCycleCoordinator:
                 results["retrain_triggered"] = True
                 results["retrain_result"] = await self.run_learning_cycle()
 
-            # Step 3: Get optimizer scores
-            optimizer_scores = await self._get_optimizer_scores()
-
-            # Step 4: Call Strategist with optimizer scores
-            # (Strategist reads its own batchSize from Airtable)
-            logger.info("Calling Strategist for new ideas...")
-            results["strategist_result"] = await self._call_strategist(
-                optimizer_scores=optimizer_scores,
+            # Step 3: Warm up Strategist (handles cold starts on free tier)
+            await self._warm_up_service(
+                self.settings.strategist_service_url,
+                "Strategist",
+                "/api/health"
             )
+
+            # Step 4: Call Strategist to generate ideas
+            # Strategist reads optimizer_score from Airtable Structures table
+            logger.info("Calling Strategist for new ideas...")
+            results["strategist_result"] = await self._call_strategist()
             results["ideas_generated"] = results["strategist_result"].get("totalGenerated", 0)
 
             # Step 5: Warm up Generator (handles cold starts on free tier)
@@ -280,21 +285,16 @@ class LearningCycleCoordinator:
             logger.warning(f"Could not fetch fresh scores: {e}, using cached")
             return self.state.get_cached_scores()
 
-    async def _call_strategist(
-        self,
-        optimizer_scores: Dict[str, float],
-    ) -> Dict[str, Any]:
+    async def _call_strategist(self) -> Dict[str, Any]:
         """
         Call Strategist to generate new structure ideas.
-        Passes optimizer scores so ideas are guided by ML predictions.
-        Note: Strategist reads its own batchSize from Airtable.
+        
+        Strategist reads optimizer_score directly from Airtable Structures table.
+        Strategist also reads its own batchSize from Airtable Settings.
         """
         url = f"{self.settings.strategist_service_url}/api/batch/run"
 
-        # Pass optimizer_scores in the body for Strategist to consider
-        # Strategist reads batchSize from its own Airtable settings
         payload = {
-            "optimizer_scores": optimizer_scores,
             "exploration_rate": self.settings.exploration_rate,
         }
 
@@ -303,12 +303,17 @@ class LearningCycleCoordinator:
             response.raise_for_status()
             return response.json()
 
-    async def _warm_up_service(self, service_url: str, service_name: str) -> bool:
+    async def _warm_up_service(self, service_url: str, service_name: str, health_path: str = "/health") -> bool:
         """
         Pre-warm a service by hitting its health endpoint.
         Helps avoid cold start timeouts on free Render tiers.
+        
+        Args:
+            service_url: Base URL of the service
+            service_name: Name for logging
+            health_path: Path to health endpoint (default: /health)
         """
-        health_url = f"{service_url}/health"
+        health_url = f"{service_url}{health_path}"
         try:
             logger.info(f"Warming up {service_name}...")
             async with httpx.AsyncClient(timeout=30) as client:
@@ -404,22 +409,21 @@ class LearningCycleCoordinator:
         self,
         num_prompts: int,
         renderer: str,
-        batch_size: Optional[int] = None,
+        batch_size: int = 10,
     ) -> Dict[str, Any]:
         """
         Call Generator to create prompts.
-        Automatically batches large requests to avoid timeouts when batch_size is provided.
+        Automatically batches large requests to avoid timeouts.
         """
         url = f"{self.settings.generator_service_url}/generate-prompts"
         all_prompts = []
         remaining = num_prompts
         batch_num = 0
-        effective_batch = batch_size or num_prompts
 
         async with httpx.AsyncClient(timeout=self.settings.generator_timeout) as client:
             while remaining > 0:
                 batch_num += 1
-                current_batch = min(remaining, effective_batch)
+                current_batch = min(remaining, batch_size)
                 logger.info(f"Generator batch {batch_num}: requesting {current_batch} prompts")
 
                 payload = {
@@ -476,19 +480,18 @@ class LearningCycleCoordinator:
                 records = []
 
                 for prompt in batch:
-                    prompt_dict = prompt if isinstance(prompt, dict) else {"promptText": str(prompt)}
                     fields = {
-                        "New Prompt": prompt_dict.get("promptText", ""),
-                        "Renderer": prompt_dict.get("renderer", ""),
+                        "New Prompt": prompt.get("promptText", ""),
+                        "Renderer": prompt.get("renderer", ""),
                     }
                     
                     # Linked records need to be arrays
-                    if prompt_dict.get("designerId"):
-                        fields["Designer"] = [prompt_dict["designerId"]]
-                    if prompt_dict.get("garmentId"):
-                        fields["Garment"] = [prompt_dict["garmentId"]]
-                    if prompt_dict.get("promptStructureId"):
-                        fields["Prompt Structure"] = [prompt_dict["promptStructureId"]]
+                    if prompt.get("designerId"):
+                        fields["Designer"] = [prompt["designerId"]]
+                    if prompt.get("garmentId"):
+                        fields["Garment"] = [prompt["garmentId"]]
+                    if prompt.get("promptStructureId"):
+                        fields["Prompt Structure"] = [prompt["promptStructureId"]]
 
                     records.append({"fields": fields})
 
