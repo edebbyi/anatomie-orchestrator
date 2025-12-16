@@ -1,3 +1,4 @@
+import asyncio
 import logging
 from dataclasses import dataclass
 from typing import Dict, Any, Optional
@@ -414,6 +415,7 @@ class LearningCycleCoordinator:
         """
         Call Generator to create prompts.
         Automatically batches large requests to avoid timeouts.
+        Adds delay between batches to avoid rate limiting.
         """
         url = f"{self.settings.generator_service_url}/generate-prompts"
         all_prompts = []
@@ -440,6 +442,10 @@ class LearningCycleCoordinator:
                 logger.info(f"Generator batch {batch_num}: received {len(batch_prompts)} prompts")
 
                 remaining -= current_batch
+                
+                # Add delay between batches to avoid rate limiting
+                if remaining > 0:
+                    await asyncio.sleep(2)
 
         logger.info(f"Generator complete: {len(all_prompts)} total prompts from {batch_num} batches")
         return {"prompts": all_prompts}
