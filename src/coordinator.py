@@ -295,6 +295,7 @@ class LearningCycleCoordinator:
         """
         url = f"{self.settings.strategist_service_url}/api/batch/run"
 
+        # Strategist reads optimizer_score from Airtable, no need to pass scores
         payload = {
             "exploration_rate": self.settings.exploration_rate,
         }
@@ -308,26 +309,32 @@ class LearningCycleCoordinator:
         """
         Pre-warm a service by hitting its health endpoint.
         Helps avoid cold start timeouts on free Render tiers.
-        
+
         Args:
             service_url: Base URL of the service
             service_name: Name for logging
             health_path: Path to health endpoint (default: /health)
         """
         health_url = f"{service_url}{health_path}"
-        try:
-            logger.info(f"Warming up {service_name}...")
-            async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.get(health_url)
-                if response.status_code == 200:
-                    logger.info(f"{service_name} is warm and ready")
-                    return True
-                else:
-                    logger.warning(f"{service_name} health check returned {response.status_code}")
-                    return False
-        except Exception as e:
-            logger.warning(f"Could not warm up {service_name}: {e}")
-            return False
+        max_attempts = 2
+
+        for attempt in range(max_attempts):
+            try:
+                logger.info(f"Warming up {service_name} (attempt {attempt + 1}/{max_attempts})...")
+                async with httpx.AsyncClient(timeout=60) as client:
+                    response = await client.get(health_url)
+                    if response.status_code == 200:
+                        logger.info(f"{service_name} is warm and ready")
+                        return True
+                    else:
+                        logger.warning(f"{service_name} health check returned {response.status_code}")
+            except Exception as e:
+                logger.warning(f"Warm-up attempt {attempt + 1} failed for {service_name}: {e}")
+                if attempt < max_attempts - 1:
+                    await asyncio.sleep(5)
+
+        logger.warning(f"Could not warm up {service_name} after {max_attempts} attempts")
+        return False
 
     # =========================================================================
     # MANUAL GENERATION (new)
@@ -441,6 +448,13 @@ class LearningCycleCoordinator:
                 all_prompts.extend(batch_prompts)
                 logger.info(f"Generator batch {batch_num}: received {len(batch_prompts)} prompts")
 
+                if len(batch_prompts) < current_batch:
+                    logger.warning(
+                        f"Generator batch {batch_num}: expected {current_batch} prompts, "
+                        f"got {len(batch_prompts)}; stopping early"
+                    )
+                    break
+
                 remaining -= current_batch
                 
                 # Add delay between batches to avoid rate limiting
@@ -486,18 +500,24 @@ class LearningCycleCoordinator:
                 records = []
 
                 for prompt in batch:
-                    fields = {
-                        "New Prompt": prompt.get("promptText", ""),
-                        "Renderer": prompt.get("renderer", ""),
-                    }
-                    
-                    # Linked records need to be arrays
-                    if prompt.get("designerId"):
-                        fields["Designer"] = [prompt["designerId"]]
-                    if prompt.get("garmentId"):
-                        fields["Garment"] = [prompt["garmentId"]]
-                    if prompt.get("promptStructureId"):
-                        fields["Prompt Structure"] = [prompt["promptStructureId"]]
+                    if isinstance(prompt, str):
+                        fields = {
+                            "New Prompt": prompt,
+                            "Renderer": "",
+                        }
+                    else:
+                        fields = {
+                            "New Prompt": prompt.get("promptText", ""),
+                            "Renderer": prompt.get("renderer", ""),
+                        }
+
+                        # Linked records need to be arrays
+                        if prompt.get("designerId"):
+                            fields["Designer"] = [prompt["designerId"]]
+                        if prompt.get("garmentId"):
+                            fields["Garment"] = [prompt["garmentId"]]
+                        if prompt.get("promptStructureId"):
+                            fields["Prompt Structure"] = [prompt["promptStructureId"]]
 
                     records.append({"fields": fields})
 

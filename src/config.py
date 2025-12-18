@@ -30,7 +30,7 @@ class Settings(BaseSettings):
     score_timeout: int = 120
     update_timeout: int = 30
     strategist_timeout: int = 120
-    generator_timeout: int = 180  # 3 min to handle cold starts + processing
+    generator_timeout: int = 300  # 5 minutes for cold start + generation
 
 
 def get_settings() -> Settings:
